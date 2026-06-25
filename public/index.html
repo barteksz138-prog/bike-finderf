@@ -106,13 +106,25 @@ function App() {
   }, []);
 
   // ── Proxy API calls ────────────────────────────────────────────────────
+  // Gemini wywoływane BEZPOŚREDNIO z przeglądarki (omija proxy serwera)
   const callGemini = async (prompt) => {
-    const resp = await fetch("/api/gemini", {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
+    const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: geminiKey, model: geminiModel, prompt }),
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 1024,
+          responseMimeType: "application/json",
+        },
+      }),
     });
-    if (!resp.ok) throw new Error(`Gemini HTTP ${resp.status}`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+    }
     return resp.json();
   };
 
