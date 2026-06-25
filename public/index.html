@@ -44,11 +44,28 @@ const BIKE_MODELS = [
   { id: "radon_slush",        label: "Radon Slush",          query: "Radon Slush" },
 ];
 
-const GEMINI_MODELS = [
-  { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash (szybki)" },
-  { id: "gemini-2.5-pro",   label: "Gemini 2.5 Pro (dokładny)" },
-  { id: "gemini-1.5-pro",   label: "Gemini 1.5 Pro" },
-];
+const PROVIDERS = {
+  gemini: {
+    label: "Google Gemini",
+    models: [
+      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+      { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
+      { id: "gemini-1.5-pro",   label: "Gemini 1.5 Pro" },
+    ],
+    keyPlaceholder: "AIza...",
+    keyHint: "aistudio.google.com/apikey",
+  },
+  groq: {
+    label: "Groq (darmowy, bez karty)",
+    models: [
+      { id: "llama-3.3-70b-versatile",  label: "Llama 3.3 70B (zalecany)" },
+      { id: "llama-3.1-8b-instant",     label: "Llama 3.1 8B (szybki)" },
+      { id: "mixtral-8x7b-32768",       label: "Mixtral 8x7B" },
+    ],
+    keyPlaceholder: "gsk_...",
+    keyHint: "console.groq.com/keys",
+  },
+};
 
 const SC = {
   analyzing: { bg: "#8b5cf622", color: "#a78bfa", border: "#8b5cf655", label: "Gemini analizuje…" },
@@ -75,7 +92,8 @@ function App() {
     try { return JSON.parse(localStorage.getItem("ddf_cfg") || "{}"); } catch { return {}; }
   });
   const [geminiKey,      setGeminiKey]      = useState(cfg.geminiKey || "");
-  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "gemini-2.0-flash");
+  const [provider,       setProvider]       = useState(cfg.provider || "groq");
+  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "llama-3.3-70b-versatile");
   const [geminiChatName, setGeminiChatName] = useState(cfg.geminiChatName || "");
   const [discordWebhook, setDiscordWebhook] = useState(cfg.discordWebhook || "");
   const [discordThread,  setDiscordThread]  = useState(cfg.discordThread || "");
@@ -94,7 +112,7 @@ function App() {
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
 
   const saveSettings = () => {
-    const data = { geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes };
+    const data = { geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes, provider };
     localStorage.setItem("ddf_cfg", JSON.stringify(data));
     addLog("💾 Ustawienia zapisane", "success");
   };
@@ -106,26 +124,46 @@ function App() {
   }, []);
 
   // ── Proxy API calls ────────────────────────────────────────────────────
-  // Gemini wywoływane BEZPOŚREDNIO z przeglądarki (omija proxy serwera)
+  // Wywołanie AI — obsługuje Gemini i Groq
   const callGemini = async (prompt) => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 1024,
-          responseMimeType: "application/json",
+    if (provider === "groq") {
+      const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${geminiKey}`,
         },
-      }),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+        body: JSON.stringify({
+          model: geminiModel,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.3,
+          max_tokens: 1024,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      // Normalizuj do formatu Gemini żeby reszta kodu działała tak samo
+      const text = data?.choices?.[0]?.message?.content || "";
+      return { candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }] };
+    } else {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 1024, responseMimeType: "application/json" },
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+      }
+      return resp.json();
     }
-    return resp.json();
   };
 
   const callDiscord = async (payload) => {
@@ -182,31 +220,44 @@ function App() {
     const prompt = `Jesteś ekspertem od rowerów dirtowych (dirt jump / slopestyle). Oceń ogłoszenie z Kleinanzeigen.de:\n\nTytuł: ${listing.title}\nCena z ogłoszenia: ${listing.price != null ? listing.price + "€" : "brak"}\nLokalizacja: ${listing.location}\nOpis: ${listing.desc}\nLink: ${listing.href}\nModel: ${listing.bike}${chatInfo}\n\nCzy warto kupić i odsprzedać z zyskiem w Polsce?\n\nOdpowiedz TYLKO w JSON (bez markdown):\n{\n  "oplaca_sie": true/false,\n  "przewidywany_zysk": liczba w EUR (szacowany zysk przy odsprzedaży w Polsce),\n  "krotki_opis": "max 2 zdania"\n}`;
 
     addLog(`🤖 Analizuję: ${listing.title}${listing.price != null ? ` za ${listing.price}€` : ""}`, "info");
-    try {
-      const data = await callGemini(prompt);
 
-      if (data?.error) {
-        addLog(`⚠️ Gemini API error: ${data.error.message}`, "error");
+    // Retry loop — czeka gdy quota wyczerpana
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const data = await callGemini(prompt);
+
+        if (data?.error) {
+          const msg = data.error.message || "";
+          // Quota exceeded — wyciągnij czas retry i poczekaj
+          const retryMatch = msg.match(/retry in ([\d.]+)s/i);
+          const waitSec = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) + 2 : 60;
+          if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("429")) {
+            addLog(`⏳ Quota Gemini wyczerpana — czekam ${waitSec}s (próba ${attempt}/3)`, "error");
+            if (attempt < 3) { await sleep(waitSec * 1000); continue; }
+            else { addLog("❌ Quota wyczerpana — włącz billing w aistudio.google.com", "error"); return null; }
+          }
+          addLog(`⚠️ Gemini API error: ${msg}`, "error");
+          return null;
+        }
+
+        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        if (!raw) {
+          const reason = data?.candidates?.[0]?.finishReason || "brak odpowiedzi";
+          addLog(`⚠️ Gemini pusta odpowiedź (${reason})`, "error");
+          return null;
+        }
+
+        let clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+        const jsonMatch = clean.match(/\{[\s\S]*\}/);
+        if (jsonMatch) clean = jsonMatch[0];
+        return JSON.parse(clean);
+
+      } catch (e) {
+        addLog(`⚠️ Błąd parsowania Gemini: ${e.message}`, "error");
         return null;
       }
-
-      const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      if (!raw) {
-        const reason = data?.candidates?.[0]?.finishReason || "brak odpowiedzi";
-        addLog(`⚠️ Gemini pusta odpowiedź (${reason})`, "error");
-        return null;
-      }
-
-      // Oczyść markdown fences i wytnij JSON
-      let clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-      const jsonMatch = clean.match(/\{[\s\S]*\}/);
-      if (jsonMatch) clean = jsonMatch[0];
-
-      return JSON.parse(clean);
-    } catch (e) {
-      addLog(`⚠️ Błąd parsowania Gemini: ${e.message}`, "error");
-      return null;
     }
+    return null;
   };
 
   // ── Discord embed ──────────────────────────────────────────────────────
@@ -311,7 +362,7 @@ function App() {
           timestamp: new Date().toLocaleTimeString("pl-PL"),
         }, ...prev].slice(0, 400));
 
-        await sleep(1500);
+        await sleep(4000);
       }
 
       await sleep(3000);
@@ -592,19 +643,44 @@ function App() {
         {tab === "settings" && (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
 
-            {/* Gemini */}
+            {/* AI Provider */}
             <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 16, padding: 24 }}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
-                <span>🤖</span> Google Gemini AI
+                <span>🤖</span> AI Provider
+              </div>
+
+              {/* Provider toggle */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Dostawca AI
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {Object.entries(PROVIDERS).map(([id, p]) => (
+                    <button key={id} onClick={() => {
+                      setProvider(id);
+                      setGeminiModel(p.models[0].id);
+                    }} style={{
+                      flex: 1, padding: "10px 8px", borderRadius: 8, fontWeight: 600, fontSize: 12,
+                      border: `1px solid ${provider === id ? "#f59e0b88" : "#1e293b"}`,
+                      background: provider === id ? "#f59e0b18" : "#0f172a",
+                      color: provider === id ? "#f59e0b" : "#475569",
+                    }}>{p.label}</button>
+                  ))}
+                </div>
+                {provider === "groq" && (
+                  <div style={{ marginTop: 8, background: "#0a1f0f", border: "1px solid #22c55e33", borderRadius: 8, padding: "8px 12px", fontSize: 11, color: "#22c55e" }}>
+                    ✅ Darmowy, bez karty — 14 400 req/dzień. Zarejestruj się na console.groq.com
+                  </div>
+                )}
               </div>
 
               <div style={{ marginBottom: 14 }}>
                 <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
-                  Klucz API Gemini *
+                  Klucz API *
                 </label>
-                <input type="password" placeholder="AIza..."
+                <input type="password" placeholder={PROVIDERS[provider].keyPlaceholder}
                   value={geminiKey} onChange={e => setGeminiKey(e.target.value)} />
-                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>aistudio.google.com/apikey</div>
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>{PROVIDERS[provider].keyHint}</div>
               </div>
 
               <div style={{ marginBottom: 14 }}>
@@ -612,18 +688,18 @@ function App() {
                   Model
                 </label>
                 <select value={geminiModel} onChange={e => setGeminiModel(e.target.value)}>
-                  {GEMINI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  {PROVIDERS[provider].models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
                 </select>
               </div>
 
               <div style={{ marginBottom: 14 }}>
                 <label style={{ fontSize: 11, color: "#f59e0b", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
-                  ★ Nazwa chatu Gemini (opcjonalne)
+                  ★ Kontekst (opcjonalne)
                 </label>
                 <input type="text" placeholder="np. Bike Deals Analyzer"
                   value={geminiChatName} onChange={e => setGeminiChatName(e.target.value)} />
                 <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>
-                  Wpisz nazwę swojego Gema/chatu — zostanie dodana do każdego promptu
+                  Dodatkowy kontekst dodawany do każdego promptu
                 </div>
               </div>
             </div>
