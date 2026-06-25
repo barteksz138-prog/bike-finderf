@@ -172,10 +172,27 @@ function App() {
     addLog(`🤖 Analizuję: ${listing.title}${listing.price != null ? ` za ${listing.price}€` : ""}`, "info");
     try {
       const data = await callGemini(prompt);
+
+      if (data?.error) {
+        addLog(`⚠️ Gemini API error: ${data.error.message}`, "error");
+        return null;
+      }
+
       const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      return JSON.parse(raw.replace(/```json|```/g, "").trim());
+      if (!raw) {
+        const reason = data?.candidates?.[0]?.finishReason || "brak odpowiedzi";
+        addLog(`⚠️ Gemini pusta odpowiedź (${reason})`, "error");
+        return null;
+      }
+
+      // Oczyść markdown fences i wytnij JSON
+      let clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+      const jsonMatch = clean.match(/\{[\s\S]*\}/);
+      if (jsonMatch) clean = jsonMatch[0];
+
+      return JSON.parse(clean);
     } catch (e) {
-      addLog(`⚠️ Błąd Gemini: ${e.message}`, "error");
+      addLog(`⚠️ Błąd parsowania Gemini: ${e.message}`, "error");
       return null;
     }
   };
