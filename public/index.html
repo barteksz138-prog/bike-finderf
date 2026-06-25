@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DirtDealFinder 🚲</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #080d18; color: #e2e8f0; font-family: 'Inter', 'Segoe UI', sans-serif; font-size: 14px; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: #0d1526; }
+    ::-webkit-scrollbar-thumb { background: #2d3f5c; border-radius: 3px; }
+    input, select, textarea {
+      background: #111c2e !important; color: #e2e8f0 !important;
+      border: 1px solid #1e3352 !important; border-radius: 8px !important;
+      padding: 9px 12px !important; outline: none !important; width: 100%;
+      font-family: inherit; font-size: 13px;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: #f59e0b !important;
+      box-shadow: 0 0 0 2px #f59e0b18 !important;
+    }
+    input::placeholder, textarea::placeholder { color: #334155 !important; }
+    button { cursor: pointer; font-family: inherit; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── Constants ──────────────────────────────────────────────────────────────
+const BIKE_MODELS = [
+  { id: "specialized_p3",     label: "Specialized P.3",      query: "Specialized P3 dirt" },
+  { id: "dartmoor_two6player",label: "Dartmoor Two6player",  query: "Dartmoor Two6player" },
+  { id: "canyon_stitched_360",label: "Canyon Stitched 360",  query: "Canyon Stitched 360" },
+  { id: "trek_ticket",        label: "Trek Ticket",           query: "Trek Ticket dirt" },
+  { id: "rose_the_bruce",     label: "Rose The Bruce",        query: "Rose The Bruce dirt" },
+  { id: "radon_slush",        label: "Radon Slush",           query: "Radon Slush" },
+];
+
+const GEMINI_MODELS = [
+  { id: "gemini-2.0-flash",  label: "Gemini 2.0 Flash (szybki)" },
+  { id: "gemini-2.5-pro",    label: "Gemini 2.5 Pro (dokładny)" },
+  { id: "gemini-1.5-pro",    label: "Gemini 1.5 Pro" },
+];
+
+const SC = {
+  idle:      { bg: "#64748b22", color: "#64748b", border: "#64748b55", label: "Oczekuje" },
+  scanning:  { bg: "#f59e0b22", color: "#f59e0b", border: "#f59e0b55", label: "Skanowanie…" },
+  analyzing: { bg: "#8b5cf622", color: "#a78bfa", border: "#8b5cf655", label: "Gemini analizuje…" },
+  deal:      { bg: "#22c55e22", color: "#22c55e", border: "#22c55e55", label: "✅ Okazja!" },
+  skip:      { bg: "#94a3b822", color: "#64748b", border: "#94a3b855", label: "Pominięte" },
+  sent:      { bg: "#3b82f622", color: "#60a5fa", border: "#3b82f655", label: "📨 Wysłano" },
+  error:     { bg: "#ef444422", color: "#f87171", border: "#ef444455", label: "⚠️ Błąd" },
+};
+
+function Badge({ status }) {
+  const s = SC[status] || SC.idle;
+  return (
+    <span style={{ background: s.bg, color: s.color, border: `1px solid ${s.border}`,
+      borderRadius: 6, padding: "2px 10px", fontSize: 11, fontWeight: 700, letterSpacing: 0.4 }}>
+      {s.label}
+    </span>
+  );
+}
+
+// ── Main App ───────────────────────────────────────────────────────────────
+function App() {
+  const [tab, setTab] = useState("scanner");
+
+  // Settings persisted in localStorage
+  const [cfg, setCfg] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ddf_cfg") || "{}"); } catch { return {}; }
+  });
+  const [geminiKey,      setGeminiKey]      = useState(cfg.geminiKey || "");
+  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "gemini-2.0-flash");
+  const [geminiChatName, setGeminiChatName] = useState(cfg.geminiChatName || "");
+  const [discordWebhook, setDiscordWebhook] = useState(cfg.discordWebhook || "");
+  const [discordThread,  setDiscordThread]  = useState(cfg.discordThread || "");
+  const [selectedBikes,  setSelectedBikes]  = useState(cfg.selectedBikes || BIKE_MODELS.map(b => b.id));
+  const [maxPrice,       setMaxPrice]       = useState(cfg.maxPrice || 800);
+  const [minProfit,      setMinProfit]      = useState(cfg.minProfit || 100);
+  const [autoInterval,   setAutoInterval]   = useState(cfg.autoInterval || 30);
+
+  const [logs,    setLogs]    = useState([]);
+  const [results, setResults] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [stats, setStats] = useState({ scanned: 0, deals: 0, sent: 0 });
+  const [nextScan, setNextScan] = useState(null);
+
+  const scanningRef   = useRef(false);
+  const seenIdsRef    = useRef(new Set());
+  const intervalRef   = useRef(null);
+  const countdownRef  = useRef(null);
+  const logsEndRef    = useRef(null);
+
+  useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
+
+  // Save cfg
+  const saveSettings = () => {
+    const data = { geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread,
+                   selectedBikes, maxPrice, minProfit, autoInterval };
+    localStorage.setItem("ddf_cfg", JSON.stringify(data));
+    addLog("💾 Ustawienia zapisane", "success");
+  };
+
+  const addLog = useCallback((msg, type = "info") => {
+    setLogs(prev => [...prev.slice(-399), {
+      time: new Date().toLocaleTimeString("pl-PL"), msg, type
+    }]);
+  }, []);
+
+  // ── API calls via local backend proxy ─────────────────────────────────
+  const callGemini = async (prompt) => {
+    const resp = await fetch("/api/gemini", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: geminiKey, model: geminiModel, prompt }),
+    });
+    if (!resp.ok) throw new Error(`Gemini API ${resp.status}`);
+    return resp.json();
+  };
+
+  const callDiscord = async (payload) => {
+    const resp = await fetch("/api/discord", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ webhookUrl: discordWebhook, threadId: discordThread, payload }),
+    });
+    return resp.json();
+  };
+
+  const scrapeKleinanzeigen = async (query) => {
+    const url = `https://www.kleinanzeigen.de/s-fahrraeder/${encodeURIComponent(query)}/k0c217`;
+    const resp = await fetch(`/api/scrape?url=${encodeURIComponent(url)}`);
+    if (!resp.ok) throw new Error(`Scrape ${resp.status}`);
+    return resp.text();
+  };
+
+  // ── Parse HTML from Kleinanzeigen ─────────────────────────────────────
+  const parseListings = (html, bikeLabel) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const items = [];
+
+    doc.querySelectorAll("article.aditem").forEach(article => {
+      const titleEl  = article.querySelector(".ellipsis, h2");
+      const priceEl  = article.querySelector(".aditem-main--middle--price-shipping--price");
+      const linkEl   = article.querySelector("a[href*='/s-anzeige/']");
+      const descEl   = article.querySelector(".aditem-main--middle--description");
+      const locEl    = article.querySelector(".aditem-main--top--left");
+      if (!titleEl || !linkEl) return;
+
+      const title = titleEl.textContent.trim();
+      const priceText = priceEl?.textContent?.trim() || "";
+      const priceMatch = priceText.match(/[\d.,]+/);
+      const price = priceMatch ? parseFloat(priceMatch[0].replace(",", ".")) : null;
+      const href = "https://www.kleinanzeigen.de" + linkEl.getAttribute("href");
+      const idMatch = href.match(/\/(\d+)$/);
+      const listingId = idMatch ? idMatch[1] : href;
+
+      items.push({
+        listingId, title, price, href,
+        desc:     descEl?.textContent?.trim() || "",
+        location: locEl?.textContent?.trim() || "",
+        bike:     bikeLabel,
+      });
+    });
+    return items;
+  };
+
+  // ── Gemini analysis ────────────────────────────────────────────────────
+  const analyzeWithGemini = async (listing) => {
+    const geminiChatInfo = geminiChatName
+      ? `\n\nUwaga: Ta analiza jest przeznaczona dla chatu Gemini o nazwie: "${geminiChatName}"`
+      : "";
+
+    const prompt = `Jesteś ekspertem od rowerów dirtowych (dirt jump / slopestyle). Oceń to ogłoszenie z Kleinanzeigen.de:
+
+Tytuł: ${listing.title}
+Cena: ${listing.price ? listing.price + "€" : "brak"}
+Lokalizacja: ${listing.location}
+Opis: ${listing.desc}
+Link: ${listing.href}
+Model szukany: ${listing.bike}
+Maks. cena zakupu: ${maxPrice}€
+Min. oczekiwany zysk: ${minProfit}€${geminiChatInfo}
+
+Pytanie: Czy to dobra okazja do kupna i odsprzedaży z zyskiem w Polsce?
+
+Odpowiedz WYŁĄCZNIE w formacie JSON (bez markdown, bez backtick):
+{
+  "oplaca_sie": true/false,
+  "szacowany_zysk_eur": liczba,
+  "cena_rynkowa_eur": liczba,
+  "krotki_opis": "max 2 zdania",
+  "uzasadnienie": "max 3 zdania dlaczego warto lub nie",
+  "ocena_stanu": "dobry/średni/zły/nieznany"
+}`;
+
+    addLog(`🤖 Gemini analizuje: ${listing.title}${listing.price ? ` za ${listing.price}€` : ""}`, "info");
+
+    try {
+      const data = await callGemini(prompt);
+      const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const cleaned = raw.replace(/```json|```/g, "").trim();
+      return JSON.parse(cleaned);
+    } catch (e) {
+      addLog(`⚠️ Błąd Gemini: ${e.message}`, "error");
+      return null;
+    }
+  };
+
+  // ── Discord send ───────────────────────────────────────────────────────
+  const sendToDiscord = async (listing, analysis) => {
+    const chatInfo = geminiChatName ? `\n💬 Chat Gemini: ${geminiChatName}` : "";
+    const embed = {
+      title: `🚲 OKAZJA: ${listing.title}`,
+      url: listing.href,
+      color: 0x22c55e,
+      fields: [
+        { name: "💰 Cena zakupu",   value: listing.price ? `**${listing.price}€**` : "brak", inline: true },
+        { name: "📈 Cena rynkowa",  value: `**${analysis.cena_rynkowa_eur}€**`, inline: true },
+        { name: "🤑 Szac. zysk",    value: `**+${analysis.szacowany_zysk_eur}€**`, inline: true },
+        { name: "📍 Lokalizacja",   value: listing.location || "–", inline: true },
+        { name: "🔧 Stan",          value: analysis.ocena_stanu || "nieznany", inline: true },
+        { name: "🚴 Model",         value: listing.bike, inline: true },
+        { name: "📝 Opis",          value: analysis.krotki_opis },
+        { name: "💡 Uzasadnienie",  value: analysis.uzasadnienie + chatInfo },
+      ],
+      footer: { text: `DirtDealFinder • ${new Date().toLocaleString("pl-PL")}` },
+    };
+    try {
+      const r = await callDiscord({ embeds: [embed] });
+      return r.ok;
+    } catch (e) {
+      addLog(`❌ Discord: ${e.message}`, "error");
+      return false;
+    }
+  };
+
+  // ── Demo listings (fallback when scrape fails) ─────────────────────────
+  const demoListings = (bike) => [
+    { listingId: `demo-${bike.id}-1-${Date.now()}`, title: `${bike.label} 2022 sehr guter Zustand`,
+      price: 650, desc: "Kaum benutzt, Neupreis 1200€. Alle Teile original.", location: "München",
+      href: `https://www.kleinanzeigen.de/s-anzeige/demo-${Date.now()}`, bike: bike.label },
+    { listingId: `demo-${bike.id}-2-${Date.now()}`, title: `${bike.label} gebraucht zu verkaufen`,
+      price: 380, desc: "Guter Zustand, kleine Gebrauchsspuren.", location: "Berlin",
+      href: `https://www.kleinanzeigen.de/s-anzeige/demo2-${Date.now()}`, bike: bike.label },
+  ];
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // ── Core scan logic ────────────────────────────────────────────────────
+  const runScan = useCallback(async () => {
+    if (!geminiKey) { addLog("❌ Brak klucza Gemini API – przejdź do Ustawień", "error"); setTab("settings"); return; }
+    if (!discordWebhook) { addLog("❌ Brak Discord Webhook – przejdź do Ustawień", "error"); setTab("settings"); return; }
+
+    scanningRef.current = true;
+    setScanning(true);
+    addLog("🚀 Rozpoczynam skan", "success");
+
+    const activeBikes = BIKE_MODELS.filter(b => selectedBikes.includes(b.id));
+
+    for (const bike of activeBikes) {
+      if (!scanningRef.current) break;
+      addLog(`🔍 Szukam: ${bike.label}`, "info");
+
+      let listings = [];
+      try {
+        const html = await scrapeKleinanzeigen(bike.query);
+        listings = parseListings(html, bike.label);
+        addLog(`📋 ${bike.label}: ${listings.length} ogłoszeń`, listings.length ? "success" : "info");
+        if (listings.length === 0) {
+          addLog(`⚠️ Brak wyników dla ${bike.label} – używam demo`, "error");
+          listings = demoListings(bike);
+        }
+      } catch (e) {
+        addLog(`⚠️ Błąd pobierania ${bike.label}: ${e.message} – demo`, "error");
+        listings = demoListings(bike);
+      }
+
+      // Filter: only NEW + within price limit
+      const fresh = listings.filter(l =>
+        !seenIdsRef.current.has(l.listingId) &&
+        (l.price === null || l.price <= maxPrice)
+      );
+      addLog(`🆕 ${fresh.length} nowych (${listings.length - fresh.length} już widzianych)`, "info");
+      setStats(s => ({ ...s, scanned: s.scanned + fresh.length }));
+
+      for (const listing of fresh) {
+        if (!scanningRef.current) break;
+        seenIdsRef.current.add(listing.listingId);
+
+        const analysis = await analyzeWithGemini(listing);
+        let status = "skip";
+
+        if (!analysis) {
+          status = "error";
+        } else if (analysis.oplaca_sie === true && analysis.szacowany_zysk_eur >= minProfit) {
+          addLog(`✅ OKAZJA: ${listing.title} | zysk: +${analysis.szacowany_zysk_eur}€`, "success");
+          setStats(s => ({ ...s, deals: s.deals + 1 }));
+          const sent = await sendToDiscord(listing, analysis);
+          status = sent ? "sent" : "deal";
+          if (sent) {
+            setStats(s => ({ ...s, sent: s.sent + 1 }));
+            addLog(`📨 Wysłano na Discord!`, "success");
+          }
+        } else {
+          addLog(`⏭ Pominięto: ${listing.title}`, "info");
+        }
+
+        setResults(prev => [{
+          id: Date.now() + Math.random(), listing, analysis, status,
+          timestamp: new Date().toLocaleTimeString("pl-PL"),
+        }, ...prev].slice(0, 300));
+
+        await sleep(1200);
+      }
+      await sleep(2000);
+    }
+
+    scanningRef.current = false;
+    setScanning(false);
+    addLog("🏁 Skan zakończony", "success");
+  }, [geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread,
+      selectedBikes, maxPrice, minProfit]);
+
+  const stopScan = () => {
+    scanningRef.current = false;
+    setScanning(false);
+    clearInterval(intervalRef.current);
+    clearInterval(countdownRef.current);
+    setNextScan(null);
+    addLog("⏹ Zatrzymano", "info");
+  };
+
+  // ── Auto-scan loop ────────────────────────────────────────────────────
+  const startAutoScan = () => {
+    runScan();
+    let secs = autoInterval * 60;
+    setNextScan(secs);
+    countdownRef.current = setInterval(() => {
+      setNextScan(s => {
+        if (s <= 1) return autoInterval * 60;
+        return s - 1;
+      });
+    }, 1000);
+    intervalRef.current = setInterval(() => {
+      runScan();
+      secs = autoInterval * 60;
+    }, autoInterval * 60 * 1000);
+  };
+
+  const fmtCountdown = s => {
+    if (!s) return null;
+    const m = Math.floor(s / 60), ss = s % 60;
+    return `${m}:${String(ss).padStart(2, "0")}`;
+  };
+
+  const logColors = { info: "#64748b", success: "#22c55e", error: "#f87171" };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+
+      {/* ── HEADER ── */}
+      <div style={{
+        background: "linear-gradient(90deg, #0c1525 0%, #111e33 100%)",
+        borderBottom: "1px solid #1a2d4a",
+        padding: "14px 24px",
+        display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 10,
+            background: "linear-gradient(135deg, #f59e0b 0%, #ef4444 100%)",
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20,
+          }}>🚲</div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: -0.5 }}>
+              DirtDeal<span style={{ color: "#f59e0b" }}>Finder</span>
+            </div>
+            <div style={{ fontSize: 10, color: "#334155", letterSpacing: 0.8, textTransform: "uppercase" }}>
+              Kleinanzeigen × Gemini AI × Discord
+            </div>
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+          {[["🔍", stats.scanned, "Nowe"], ["✅", stats.deals, "Okazje"], ["📨", stats.sent, "Wysłane"]].map(([ico, n, lbl]) => (
+            <div key={lbl} style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#e2e8f0" }}>{ico} {n}</div>
+              <div style={{ fontSize: 10, color: "#475569", textTransform: "uppercase" }}>{lbl}</div>
+            </div>
+          ))}
+          {nextScan && (
+            <div style={{ textAlign: "center", background: "#0f172a", borderRadius: 8, padding: "6px 14px" }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#f59e0b" }}>⏱ {fmtCountdown(nextScan)}</div>
+              <div style={{ fontSize: 10, color: "#475569" }}>do następnego skanu</div>
+            </div>
+          )}
+        </div>
+
+        {/* Nav tabs */}
+        <div style={{ display: "flex", gap: 4 }}>
+          {[["scanner","🔍 Skaner"], ["results","📋 Wyniki"], ["settings","⚙️ Ustawienia"]].map(([id, label]) => (
+            <button key={id} onClick={() => setTab(id)} style={{
+              padding: "8px 16px", borderRadius: 8, border: "none", fontWeight: 600, fontSize: 13,
+              background: tab === id ? "#f59e0b" : "#1e293b",
+              color: tab === id ? "#0a0f18" : "#64748b",
+              transition: "all .2s",
+            }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── BODY ── */}
+      <div style={{ flex: 1, padding: 24, maxWidth: 1200, width: "100%", margin: "0 auto" }}>
+
+        {/* ═══ SCANNER TAB ═══ */}
+        {tab === "scanner" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 20 }}>
+
+            {/* Left: controls + log */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+              {/* Bike selector */}
+              <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 12, color: "#475569", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 14 }}>
+                  Wybierz modele do skanowania
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {BIKE_MODELS.map(b => {
+                    const sel = selectedBikes.includes(b.id);
+                    return (
+                      <button key={b.id} onClick={() => setSelectedBikes(prev =>
+                        sel ? prev.filter(x => x !== b.id) : [...prev, b.id]
+                      )} style={{
+                        padding: "7px 14px", borderRadius: 8, fontWeight: 600, fontSize: 13,
+                        border: `1px solid ${sel ? "#f59e0b88" : "#1e293b"}`,
+                        background: sel ? "#f59e0b18" : "#0f172a",
+                        color: sel ? "#f59e0b" : "#475569",
+                        transition: "all .15s",
+                      }}>{b.label}</button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Control buttons */}
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={runScan} disabled={scanning} style={{
+                  flex: 1, padding: "12px 0", borderRadius: 10, border: "none", fontWeight: 700, fontSize: 14,
+                  background: scanning ? "#1e293b" : "linear-gradient(135deg, #f59e0b, #ef4444)",
+                  color: scanning ? "#475569" : "#0a0f18",
+                  opacity: scanning ? 0.6 : 1,
+                }}>
+                  {scanning ? "⏳ Skanowanie…" : "▶ Skanuj teraz"}
+                </button>
+                <button onClick={startAutoScan} disabled={scanning} style={{
+                  flex: 1, padding: "12px 0", borderRadius: 10, border: "1px solid #22c55e55",
+                  fontWeight: 700, fontSize: 14,
+                  background: "#22c55e18", color: "#22c55e",
+                  opacity: scanning ? 0.5 : 1,
+                }}>
+                  🔄 Auto co {autoInterval} min
+                </button>
+                {scanning && (
+                  <button onClick={stopScan} style={{
+                    padding: "12px 20px", borderRadius: 10, border: "1px solid #ef444455",
+                    background: "#ef444418", color: "#f87171", fontWeight: 700,
+                  }}>⏹ Stop</button>
+                )}
+              </div>
+
+              {/* Log */}
+              <div style={{
+                background: "#070c17", border: "1px solid #111e33", borderRadius: 14,
+                height: 380, overflow: "auto", padding: 16, fontFamily: "monospace", fontSize: 12,
+              }}>
+                {logs.length === 0 && (
+                  <div style={{ color: "#1e293b", textAlign: "center", marginTop: 60 }}>
+                    Uruchom skan, żeby zobaczyć logi…
+                  </div>
+                )}
+                {logs.map((l, i) => (
+                  <div key={i} style={{ marginBottom: 3, color: logColors[l.type] || "#64748b" }}>
+                    <span style={{ color: "#1e3352" }}>{l.time} </span>{l.msg}
+                  </div>
+                ))}
+                <div ref={logsEndRef} />
+              </div>
+            </div>
+
+            {/* Right: filters */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+              <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 16, color: "#94a3b8" }}>🎯 Filtry</div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                    Maks. cena zakupu (€)
+                  </label>
+                  <input type="number" value={maxPrice}
+                    onChange={e => setMaxPrice(+e.target.value)} min={0} max={5000} />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                    Min. zysk (€)
+                  </label>
+                  <input type="number" value={minProfit}
+                    onChange={e => setMinProfit(+e.target.value)} min={0} max={2000} />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                    Interwał auto-skanu (minuty)
+                  </label>
+                  <input type="number" value={autoInterval}
+                    onChange={e => setAutoInterval(+e.target.value)} min={5} max={1440} />
+                </div>
+              </div>
+
+              {/* Status box */}
+              <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 16, color: "#94a3b8" }}>📊 Status</div>
+                {[
+                  ["Gemini API", geminiKey ? "✅ Skonfigurowany" : "❌ Brak klucza", geminiKey ? "#22c55e" : "#f87171"],
+                  ["Discord",   discordWebhook ? "✅ Webhook OK" : "❌ Brak webhook", discordWebhook ? "#22c55e" : "#f87171"],
+                  ["Chat Gemini", geminiChatName || "–", "#64748b"],
+                  ["Modele", `${selectedBikes.length}/${BIKE_MODELS.length}`, "#f59e0b"],
+                ].map(([k, v, c]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 10, fontSize: 13 }}>
+                    <span style={{ color: "#475569" }}>{k}</span>
+                    <span style={{ color: c, fontWeight: 600 }}>{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ RESULTS TAB ═══ */}
+        {tab === "results" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>Ostatnie wyniki ({results.length})</div>
+              {results.length > 0 && (
+                <button onClick={() => setResults([])} style={{
+                  padding: "6px 14px", borderRadius: 8, border: "1px solid #ef444433",
+                  background: "#ef444411", color: "#f87171", fontSize: 12, fontWeight: 600,
+                }}>🗑 Wyczyść</button>
+              )}
+            </div>
+
+            {results.length === 0 ? (
+              <div style={{ background: "#0d1526", border: "1px dashed #1a2d4a", borderRadius: 16,
+                padding: 60, textAlign: "center", color: "#1e3352" }}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>🚲</div>
+                Brak wyników. Uruchom skan.
+              </div>
+            ) : results.map(r => (
+              <div key={r.id} style={{
+                background: "#0d1526",
+                border: `1px solid ${r.status === "sent" ? "#3b82f633" : r.status === "deal" ? "#22c55e33" : "#1a2d4a"}`,
+                borderRadius: 14, padding: 18, marginBottom: 10,
+                display: "grid", gridTemplateColumns: "1fr auto", gap: 16, alignItems: "start",
+              }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+                    <Badge status={r.status} />
+                    <span style={{ color: "#f59e0b", fontSize: 11 }}>{r.listing.bike}</span>
+                    <span style={{ color: "#334155", fontSize: 11 }}>• {r.timestamp}</span>
+                  </div>
+                  <a href={r.listing.href} target="_blank" rel="noopener noreferrer"
+                    style={{ color: "#e2e8f0", fontWeight: 600, textDecoration: "none", fontSize: 14 }}>
+                    {r.listing.title}
+                  </a>
+                  {r.analysis && (
+                    <>
+                      <div style={{ marginTop: 6, color: "#94a3b8", fontSize: 12 }}>{r.analysis.krotki_opis}</div>
+                      <div style={{ marginTop: 4, fontSize: 11, color: "#475569" }}>
+                        📍 {r.listing.location} • 🔧 {r.analysis.ocena_stanu}
+                      </div>
+                    </>
+                  )}
+                </div>
+                {r.analysis && (
+                  <div style={{ textAlign: "right", minWidth: 120 }}>
+                    {r.listing.price && <>
+                      <div style={{ fontSize: 20, fontWeight: 800 }}>{r.listing.price}€</div>
+                      <div style={{ fontSize: 10, color: "#475569" }}>cena zakupu</div>
+                    </>}
+                    <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: "#22c55e" }}>
+                      +{r.analysis.szacowany_zysk_eur}€
+                    </div>
+                    <div style={{ fontSize: 10, color: "#475569" }}>szac. zysk</div>
+                    <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
+                      rynk: {r.analysis.cena_rynkowa_eur}€
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ═══ SETTINGS TAB ═══ */}
+        {tab === "settings" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+
+            {/* Gemini */}
+            <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 22 }}>🤖</span> Google Gemini AI
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Klucz API Gemini *
+                </label>
+                <input type="password" placeholder="AIza..."
+                  value={geminiKey} onChange={e => setGeminiKey(e.target.value)} />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>
+                  Pobierz: aistudio.google.com/apikey
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Model Gemini
+                </label>
+                <select value={geminiModel} onChange={e => setGeminiModel(e.target.value)}>
+                  {GEMINI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                </select>
+              </div>
+
+              {/* ★ NOWE POLE: Nazwa chatu Gemini */}
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#f59e0b", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  ★ Nazwa chatu Gemini (opcjonalnie)
+                </label>
+                <input type="text" placeholder="np. Bike Deals Analyzer"
+                  value={geminiChatName} onChange={e => setGeminiChatName(e.target.value)} />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5, lineHeight: 1.5 }}>
+                  Wpisz nazwę swojego chatu w Gemini (np. z Gemini Gems). Zostanie dodana do promptu, 
+                  żeby Gemini wiedział, do której rozmowy kierować analizę. Znajdziesz ją w lewym panelu Gemini.
+                </div>
+              </div>
+
+              <div style={{ padding: "10px 14px", background: "#070c17", borderRadius: 10, fontSize: 12, color: "#475569", lineHeight: 1.7 }}>
+                💡 <strong style={{ color: "#64748b" }}>Flash</strong> — szybki, tani, wystarczy do skanowania<br />
+                💡 <strong style={{ color: "#64748b" }}>2.5 Pro</strong> — dokładniejsza analiza zysku
+              </div>
+            </div>
+
+            {/* Discord */}
+            <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 22 }}>💬</span> Discord
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Webhook URL *
+                </label>
+                <input type="password" placeholder="https://discord.com/api/webhooks/..."
+                  value={discordWebhook} onChange={e => setDiscordWebhook(e.target.value)} />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>
+                  Kanał Discord → Edytuj kanał → Integracje → Webhooki
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Thread ID (opcjonalne)
+                </label>
+                <input type="text" placeholder="ID wątku Discord"
+                  value={discordThread} onChange={e => setDiscordThread(e.target.value)} />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>
+                  Kliknij prawym przyciskiem na wątek → Kopiuj ID
+                </div>
+              </div>
+
+              <button onClick={async () => {
+                if (!discordWebhook) { addLog("❌ Brak webhook URL!", "error"); return; }
+                try {
+                  const r = await callDiscord({ content: "✅ **DirtDealFinder** połączony! Będę tu wysyłał okazje 🚲" });
+                  if (r.ok) { addLog("✅ Test Discord – OK!", "success"); }
+                  else addLog(`❌ Webhook błąd (status ${r.status})`, "error");
+                } catch (e) { addLog(`❌ ${e.message}`, "error"); }
+              }} style={{
+                width: "100%", padding: "10px 0", borderRadius: 10,
+                border: "1px solid #5865f255", background: "#5865f218",
+                color: "#7c8cf8", fontWeight: 700, fontSize: 13,
+              }}>📡 Wyślij wiadomość testową</button>
+            </div>
+
+            {/* Save button */}
+            <div style={{ gridColumn: "span 2" }}>
+              <button onClick={saveSettings} style={{
+                width: "100%", padding: "14px 0", borderRadius: 12, border: "none",
+                fontWeight: 800, fontSize: 15,
+                background: "linear-gradient(135deg, #f59e0b, #ef4444)",
+                color: "#0a0f18",
+              }}>💾 Zapisz ustawienia</button>
+            </div>
+
+            {/* How it works */}
+            <div style={{ gridColumn: "span 2", background: "#0d1526", border: "1px solid #1a3a5f", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 16, color: "#3b82f6" }}>ℹ️ Jak to działa?</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
+                {[
+                  { ico: "🔍", t: "Skanowanie",  d: "Backend pobiera ogłoszenia z Kleinanzeigen.de i omija blokadę CORS" },
+                  { ico: "🆕", t: "Tylko nowe",   d: "Ogłoszenia już widziane są pomijane — każde leci do Gemini tylko raz" },
+                  { ico: "🤖", t: "Gemini AI",    d: "Backend wysyła ogłoszenie do Gemini z zapytaniem: czy warto kupić?" },
+                  { ico: "📨", t: "Discord",      d: "Gdy Gemini mówi TAK i zysk ≥ minimum — embed trafia na webhook" },
+                ].map(s => (
+                  <div key={s.t} style={{ background: "#070c17", borderRadius: 12, padding: 16 }}>
+                    <div style={{ fontSize: 22, marginBottom: 8 }}>{s.ico}</div>
+                    <div style={{ fontWeight: 700, marginBottom: 6, fontSize: 13 }}>{s.t}</div>
+                    <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.6 }}>{s.d}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
