@@ -217,7 +217,30 @@ function App() {
       ? `\nKontekst: Ta analiza idzie do chatu Gemini o nazwie "${geminiChatName}".`
       : "";
 
-    const prompt = `Jesteś ekspertem od rowerów dirtowych (dirt jump / slopestyle). Oceń ogłoszenie z Kleinanzeigen.de:\n\nTytuł: ${listing.title}\nCena z ogłoszenia: ${listing.price != null ? listing.price + "€" : "brak"}\nLokalizacja: ${listing.location}\nOpis: ${listing.desc}\nLink: ${listing.href}\nModel: ${listing.bike}${chatInfo}\n\nCzy warto kupić i odsprzedać z zyskiem w Polsce?\n\nOdpowiedz TYLKO w JSON (bez markdown):\n{\n  "oplaca_sie": true/false,\n  "przewidywany_zysk": liczba w EUR (szacowany zysk przy odsprzedaży w Polsce),\n  "krotki_opis": "max 2 zdania"\n}`;
+    const prompt = `Jesteś ekspertem od rowerów dirtowych (dirt jump / slopestyle). Kupujesz rowery w Niemczech i sprzedajesz je w Polsce z zyskiem.
+
+TWOJE DANE SPRZEDAŻOWE (rowery które już sprzedałeś w Polsce):
+- Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
+- Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+- Rose The Bruce 2 → 3800 zł (~880€)
+- Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
+- Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)
+
+ZASADA: Opłaca się TYLKO jeśli możesz sprzedać rower w Polsce za minimum 120% ceny zakupu z ogłoszenia (czyli zysk min. 20%). Nie uwzględniaj kosztów transportu.
+
+OCEŃ TO OGŁOSZENIE:
+Tytuł: ${listing.title}
+Cena z ogłoszenia: ${listing.price != null ? listing.price + "€" : "brak"}
+Lokalizacja: ${listing.location}
+Opis: ${listing.desc}
+Model: ${listing.bike}${chatInfo}
+
+Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
+{
+  "oplaca_sie": true lub false,
+  "przewidywany_zysk": liczba w EUR (cena sprzedaży w PL minus cena zakupu),
+  "krotki_opis": "max 2 zdania — stan roweru i dlaczego opłaca się lub nie"
+}`;
 
     addLog(`🤖 Analizuję: ${listing.title}${listing.price != null ? ` za ${listing.price}€` : ""}`, "info");
 
