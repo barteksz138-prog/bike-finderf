@@ -92,8 +92,8 @@ function App() {
     try { return JSON.parse(localStorage.getItem("ddf_cfg") || "{}"); } catch { return {}; }
   });
   const [geminiKey,      setGeminiKey]      = useState(cfg.geminiKey || "");
-  const [provider,       setProvider]       = useState(cfg.provider || "groq");
-  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "llama-3.3-70b-versatile");
+  const [provider,       setProvider]       = useState(cfg.provider || "gemini");
+  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "gemini-2.0-flash");
   const [geminiChatName, setGeminiChatName] = useState(cfg.geminiChatName || "");
   const [discordWebhook, setDiscordWebhook] = useState(cfg.discordWebhook || "");
   const [discordThread,  setDiscordThread]  = useState(cfg.discordThread || "");
@@ -105,9 +105,22 @@ function App() {
   const [stats,    setStats]    = useState({ scanned: 0, deals: 0, sent: 0 });
   const [cycleNum, setCycleNum] = useState(0);
 
-  const runningRef  = useRef(false);
-  const seenIdsRef  = useRef(new Set());
+  const runningRef   = useRef(false);
+  const firstCycleRef = useRef(true); // cykl #1 = tylko zbieramy ID, nie analizujemy
   const logsEndRef  = useRef(null);
+
+  // Zapamiętaj widziane ID między restartami
+  const loadSeenIds = () => {
+    try { return new Set(JSON.parse(localStorage.getItem("ddf_seen") || "[]")); } catch { return new Set(); }
+  };
+  const seenIdsRef = useRef(loadSeenIds());
+  const saveSeenId = (id) => {
+    seenIdsRef.current.add(id);
+    try {
+      const arr = [...seenIdsRef.current].slice(-2000); // max 2000 ID
+      localStorage.setItem("ddf_seen", JSON.stringify(arr));
+    } catch {}
+  };
 
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
 
@@ -347,6 +360,13 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
 
       const fresh = listings.filter(l => !seenIdsRef.current.has(l.listingId));
 
+      if (firstCycleRef.current) {
+        // Cykl #1 — tylko zapamiętaj istniejące ID, nie analizuj
+        fresh.forEach(l => saveSeenId(l.listingId));
+        addLog(`📌 ${bike.label}: zapamiętano ${fresh.length} istniejących ogłoszeń`, "info");
+        continue;
+      }
+
       if (fresh.length === 0) {
         addLog(`✔ ${bike.label}: brak nowych`, "info");
       } else {
@@ -356,7 +376,7 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
 
       for (const listing of fresh) {
         if (!runningRef.current) return;
-        seenIdsRef.current.add(listing.listingId);
+        saveSeenId(listing.listingId);
 
         const analysis = await analyzeWithGemini(listing);
         let status = "skip";
@@ -385,12 +405,13 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
           timestamp: new Date().toLocaleTimeString("pl-PL"),
         }, ...prev].slice(0, 400));
 
-        await sleep(4000);
+        await sleep(5000);
       }
 
       await sleep(3000);
     }
 
+    firstCycleRef.current = false;
     addLog(`✔ Cykl #${cycleN} zakończony — czekam 60s przed kolejnym`, "info");
   }, [geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes]);
 
@@ -400,9 +421,10 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
     if (!discordWebhook) { addLog("❌ Brak Discord Webhook",    "error"); setTab("settings"); return; }
 
     runningRef.current = true;
+    firstCycleRef.current = true;
     setRunning(true);
     setStats({ scanned: 0, deals: 0, sent: 0 });
-    addLog("🚀 Uruchamiam skanowanie — webhook tylko gdy Gemini mówi TAK", "success");
+    addLog("🚀 Uruchamiam skanowanie — zbieram istniejące ogłoszenia (cykl #1), od cyklu #2 analizuję tylko nowe", "success");
 
     let n = 1;
     while (runningRef.current) {
@@ -584,9 +606,18 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
                     <span style={{ color: c, fontWeight: 600 }}>{v}</span>
                   </div>
                 ))}
-              </div>
+              <button onClick={() => {
+                seenIdsRef.current = new Set();
+                localStorage.removeItem("ddf_seen");
+                addLog("🗑 Reset — następny cykl przeskanuje wszystko od nowa", "info");
+              }} style={{
+                width: "100%", marginTop: 10, padding: "7px 0", borderRadius: 8,
+                border: "1px solid #1e293b", background: "transparent",
+                color: "#475569", fontSize: 11, fontWeight: 600,
+              }}>🗑 Reset zapamiętanych ogłoszeń</button>
+            </div>
 
-              <div style={{ background: "#070f1e", border: "1px solid #0f1f36", borderRadius: 14, padding: 16, fontSize: 12, color: "#334155", lineHeight: 1.7 }}>
+            <div style={{ background: "#070f1e", border: "1px solid #0f1f36", borderRadius: 14, padding: 16, fontSize: 12, color: "#334155", lineHeight: 1.7 }}>
                 🔄 Sprawdza każdy model co ~60s<br/>
                 🆕 Tylko <strong style={{ color: "#475569" }}>nowe ogłoszenia</strong> trafiają do Gemini<br/>
                 📨 Discord tylko gdy Gemini = <strong style={{ color: "#22c55e" }}>TAK</strong>
